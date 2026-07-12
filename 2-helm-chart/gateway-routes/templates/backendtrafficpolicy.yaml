@@ -1,0 +1,24 @@
+{{- /*
+BackendTrafficPolicy - applies traffic behavior (timeouts, retries, load
+balancing, health checks, circuit breaking) to the HTTPRoute for this app.
+*/ -}}
+{{- $policies := (.Values.gatewayAPI.policies | default dict) -}}
+{{- $p := $policies.backendTraffic | default dict -}}
+{{- if $p.enabled | default false }}
+{{- $appName := include "gateway-routes.appName" . -}}
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: BackendTrafficPolicy
+metadata:
+  name: {{ default (printf "%s-backend-traffic" $appName) $p.name }}
+  namespace: {{ include "gateway-routes.namespace" . }}
+  labels:
+    {{- include "gateway-routes.labels" . | nindent 4 }}
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: {{ default (include "gateway-routes.routeName" .) $p.targetRouteName }}
+  {{- with $p.spec }}
+{{ toYaml . | nindent 2 }}
+  {{- end }}
+{{- end }}

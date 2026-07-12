@@ -1,0 +1,124 @@
+# ==============================================================================
+# gateway-routes - default values
+#
+# This chart deploys Gateway API HTTPRoutes and Envoy Gateway policies for a
+# single application. Enable only what you need. Nothing is created unless
+# gatewayAPI.enabled is true.
+# ==============================================================================
+
+application:
+  # Logical app name. Defaults to the Helm release name if empty.
+  # Used for resource names, the default backend Service name, and labels.
+  name: ""
+  # Namespace override. Defaults to the release namespace if empty.
+  namespace: ""
+
+# Default backend Service (used when a route rule does not specify backendRefs).
+service:
+  port: 80
+
+gatewayAPI:
+  # Master switch. When false, this chart renders nothing.
+  enabled: false
+
+  # ----------------------------------------------------------------------------
+  # Shared gateway attachment (most common case)
+  # ----------------------------------------------------------------------------
+  # The platform-managed shared gateway to attach the HTTPRoute to.
+  gatewayName: main-gateway
+  gatewayNamespace: envoy-gateway-system
+  # Optional: pin to a specific listener on the gateway.
+  # sectionName: https
+
+  # HTTPRoute name. Defaults to application.name / release name if empty.
+  routeName: ""
+
+  # Hostnames served via the SHARED wildcard gateway
+  # (e.g. myapp.example.com when the gateway terminates *.example.com).
+  # At least one hostname (here or in customHostnames) is REQUIRED when enabled.
+  hostnames: []
+  #  - myapp.example.com
+
+  # Default backend for the simple (no rules) case.
+  serviceName: ""      # defaults to application.name
+  servicePort: ""      # defaults to service.port
+
+  # Optional annotations added to the HTTPRoute.
+  annotations: {}
+
+  # ----------------------------------------------------------------------------
+  # Advanced routing rules (optional)
+  # Provide explicit path matches / filters / backendRefs. When omitted, a
+  # single "/" PathPrefix rule to the default backend is generated.
+  # ----------------------------------------------------------------------------
+  rules: []
+  #  - matches:
+  #      - path:
+  #          type: PathPrefix
+  #          value: /api
+  #    filters:
+  #      - type: URLRewrite
+  #        urlRewrite:
+  #          path:
+  #            type: ReplacePrefixMatch
+  #            replacePrefixMatch: /
+  #    backendRefs:
+  #      - group: ""
+  #        kind: Service
+  #        name: myapp-api
+  #        port: 8080
+  #        weight: 1
+
+  # ----------------------------------------------------------------------------
+  # Custom-domain Gateway (only if the app needs its own domain)
+  # Renders a dedicated Gateway in the app namespace with HTTPS listeners.
+  # ----------------------------------------------------------------------------
+  customHostnames: []
+  #  - myapp.custom-domain.com
+  gatewayClassName: envoy-gateway-class
+  customGatewayName: ""          # defaults to <app>-gateway
+  customTlsSecretName: ""        # defaults to <app>-tls-secret
+  customGatewayAnnotations: {}
+
+  # ----------------------------------------------------------------------------
+  # Policies - enable individually as needed.
+  # ----------------------------------------------------------------------------
+  policies:
+    # Timeouts, retries, load balancing, health checks (targets the HTTPRoute).
+    backendTraffic:
+      enabled: false
+      name: ""
+      targetRouteName: ""
+      spec: {}
+      #  timeout:
+      #    http:
+      #      requestTimeout: 60s
+      #      connectionIdleTimeout: 30s
+      #  retry:
+      #    numRetries: 3
+
+    # TLS to the upstream Service (NGINX backend-protocol: HTTPS equivalent).
+    backendTLS:
+      enabled: false
+      name: ""
+      targetServiceName: ""
+      spec: {}
+      #  validation:
+      #    wellKnownCACertificates: System
+      #    hostname: upstream.svc
+
+    # Client-facing connection settings (targets a Gateway, not a route).
+    # Usually managed by the platform team at the shared gateway level.
+    clientTraffic:
+      enabled: false
+      name: ""
+      targetGatewayName: ""
+      targetGatewayNamespace: ""
+      spec: {}
+
+    # Advanced Envoy escape hatch. Kept for future use; disabled by default.
+    envoyPatch:
+      enabled: false
+      name: ""
+      targetGatewayName: ""
+      spec: {}

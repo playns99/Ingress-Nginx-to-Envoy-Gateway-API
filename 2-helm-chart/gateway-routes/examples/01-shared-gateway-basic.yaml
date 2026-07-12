@@ -1,0 +1,18 @@
+# Example 1: Simplest case
+# App exposed on the SHARED wildcard gateway, one hostname, default backend.
+#
+#   helm install myapp ../gateway-routes -f 01-shared-gateway-basic.yaml -n myapp
+
+application:
+  name: myapp
+
+service:
+  port: 8080
+
+gatewayAPI:
+  enabled: true
+  gatewayName: main-gateway
+  gatewayNamespace: envoy-gateway-system
+  hostnames:
+    - myapp.example.com
+  # Default backend = Service "myapp" on port 8080 (from service.port).

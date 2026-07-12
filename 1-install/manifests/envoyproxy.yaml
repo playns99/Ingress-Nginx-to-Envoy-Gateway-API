@@ -1,0 +1,58 @@
+# ------------------------------------------------------------------------------
+# EnvoyProxy - Data-plane configuration for Envoy Gateway.
+#
+# This custom resource controls the Envoy proxy DEPLOYMENT (the data plane):
+#   - Envoy image/version
+#   - CPU / memory requests and limits
+#   - Horizontal autoscaling (HPA)
+#   - The Kubernetes Service type used to expose the gateway
+#
+# It is referenced by the GatewayClass via parametersRef and MUST live in the
+# same namespace as the Envoy Gateway controller (envoy-gateway-system).
+#
+# NOTE:
+#   - The control-plane version is set by the Helm chart version.
+#   - This image tag is the DATA-plane (Envoy proxy) version and must be
+#     compatible with your Envoy Gateway version. Check the release notes:
+#     https://github.com/envoyproxy/gateway/releases
+# ------------------------------------------------------------------------------
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: EnvoyProxy
+metadata:
+  name: main-envoy-proxy
+  namespace: envoy-gateway-system
+spec:
+  # mergeGateways lets multiple Gateway resources share one Envoy deployment,
+  # merging their listeners/routes. Useful for a shared platform gateway.
+  mergeGateways: true
+  provider:
+    type: Kubernetes
+    kubernetes:
+      envoyDeployment:
+        container:
+          # Replace with your registry/mirror if you do not pull from Docker Hub.
+          image: docker.io/envoyproxy/envoy:distroless-v1.36.3
+          resources:
+            limits:
+              cpu: 2000m
+              memory: 2048Mi
+            requests:
+              cpu: 200m
+              memory: 256Mi
+      envoyHpa:
+        minReplicas: 2
+        maxReplicas: 5
+        metrics:
+          - type: Resource
+            resource:
+              name: cpu
+              target:
+                type: Utilization
+                averageUtilization: 80
+      envoyService:
+        # Change to ClusterIP/NodePort if you front the gateway with your own LB,
+        # or keep LoadBalancer to get a cloud load balancer automatically.
+        type: LoadBalancer
+        # Add cloud-provider specific annotations here if required, e.g.:
+        # annotations:
+        #   service.beta.kubernetes.io/aws-load-balancer-internal: "true"

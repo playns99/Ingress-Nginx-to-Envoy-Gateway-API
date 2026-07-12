@@ -1,0 +1,36 @@
+{{- $gw := .Values.gatewayAPI | default dict -}}
+gateway-routes deployed for release "{{ .Release.Name }}" in namespace "{{ include "gateway-routes.namespace" . }}".
+
+{{- if not ($gw.enabled | default false) }}
+
+NOTE: gatewayAPI.enabled is FALSE, so no HTTPRoute or policies were created.
+Set gatewayAPI.enabled=true (and at least one hostname) to expose your app.
+{{- else }}
+
+Resources rendered:
+  - HTTPRoute: {{ include "gateway-routes.routeName" . }}
+{{- if $gw.customHostnames }}
+  - Gateway (custom domain): {{ include "gateway-routes.customGatewayName" . }}
+{{- end }}
+{{- with $gw.policies }}
+{{- if (.backendTraffic).enabled }}
+  - BackendTrafficPolicy
+{{- end }}
+{{- if (.backendTLS).enabled }}
+  - BackendTLSPolicy
+{{- end }}
+{{- if (.clientTraffic).enabled }}
+  - ClientTrafficPolicy
+{{- end }}
+{{- if (.envoyPatch).enabled }}
+  - EnvoyPatchPolicy
+{{- end }}
+{{- end }}
+
+Verify:
+  kubectl get httproute -n {{ include "gateway-routes.namespace" . }}
+  kubectl describe httproute {{ include "gateway-routes.routeName" . }} -n {{ include "gateway-routes.namespace" . }}
+
+A healthy route shows the parent Gateway with "Accepted=True" and
+"ResolvedRefs=True" in its status conditions.
+{{- end }}

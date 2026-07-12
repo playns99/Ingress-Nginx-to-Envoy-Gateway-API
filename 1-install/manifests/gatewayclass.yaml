@@ -1,0 +1,16 @@
+# ------------------------------------------------------------------------------
+# GatewayClass - the "class" that Gateways reference, similar to an
+# IngressClass. It binds Gateway API objects to the Envoy Gateway controller
+# and points to the EnvoyProxy data-plane configuration via parametersRef.
+# ------------------------------------------------------------------------------
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: envoy-gateway-class
+spec:
+  controllerName: gateway.envoyproxy.io/gatewayclass-controller
+  parametersRef:
+    group: gateway.envoyproxy.io
+    kind: EnvoyProxy
+    name: main-envoy-proxy
+    namespace: envoy-gateway-system

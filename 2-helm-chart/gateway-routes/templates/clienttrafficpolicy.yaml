@@ -1,0 +1,28 @@
+{{- /*
+ClientTrafficPolicy - configures client-facing connection behavior (keep-alive,
+client-side timeouts, header size limits, TLS settings). It can ONLY target a
+Gateway, not an HTTPRoute. Typically owned by the platform team at the gateway
+level; exposed here for teams running their own custom-domain Gateway.
+*/ -}}
+{{- $policies := (.Values.gatewayAPI.policies | default dict) -}}
+{{- $p := $policies.clientTraffic | default dict -}}
+{{- if $p.enabled | default false }}
+{{- $appName := include "gateway-routes.appName" . -}}
+{{- $gwName := default (include "gateway-routes.customGatewayName" .) $p.targetGatewayName -}}
+{{- $gwNs := default (include "gateway-routes.namespace" .) $p.targetGatewayNamespace -}}
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: ClientTrafficPolicy
+metadata:
+  name: {{ default (printf "%s-client-traffic" $appName) $p.name }}
+  namespace: {{ $gwNs }}
+  labels:
+    {{- include "gateway-routes.labels" . | nindent 4 }}
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: {{ $gwName }}
+  {{- with $p.spec }}
+{{ toYaml . | nindent 2 }}
+  {{- end }}
+{{- end }}

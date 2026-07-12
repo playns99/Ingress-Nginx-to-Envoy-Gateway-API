@@ -1,0 +1,32 @@
+{{- /*
+EnvoyPatchPolicy - an escape hatch for advanced Envoy config that has no native
+Gateway API / Envoy Gateway field yet. Kept in the chart for future use even
+when disabled. Requires EnvoyGateway.extensionApis.enableEnvoyPatchPolicy=true
+on the control plane to take effect.
+
+Only rendered when explicitly enabled AND jsonPatches are provided.
+*/ -}}
+{{- $policies := (.Values.gatewayAPI.policies | default dict) -}}
+{{- $p := $policies.envoyPatch | default dict -}}
+{{- if $p.enabled | default false }}
+{{- $appName := include "gateway-routes.appName" . -}}
+{{- $spec := $p.spec | default dict -}}
+apiVersion: {{ default "gateway.envoyproxy.io/v1alpha1" $p.apiVersion }}
+kind: EnvoyPatchPolicy
+metadata:
+  name: {{ default (printf "%s-envoy-patch" $appName) $p.name }}
+  namespace: {{ include "gateway-routes.namespace" . }}
+  labels:
+    {{- include "gateway-routes.labels" . | nindent 4 }}
+spec:
+  targetRef:
+    group: gateway.networking.k8s.io
+    kind: Gateway
+    name: {{ default (include "gateway-routes.customGatewayName" .) $p.targetGatewayName }}
+  {{- if $spec }}
+{{ toYaml (omit $spec "targetRef") | nindent 2 }}
+  {{- else }}
+  type: JSONPatch
+  jsonPatches: []
+  {{- end }}
+{{- end }}

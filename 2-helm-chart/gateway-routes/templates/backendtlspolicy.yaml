@@ -1,0 +1,24 @@
+{{- /*
+BackendTLSPolicy - tells Envoy to speak TLS to the upstream Service
+(equivalent to NGINX backend-protocol: HTTPS). Standard Gateway API type.
+*/ -}}
+{{- $policies := (.Values.gatewayAPI.policies | default dict) -}}
+{{- $p := $policies.backendTLS | default dict -}}
+{{- if $p.enabled | default false }}
+{{- $appName := include "gateway-routes.appName" . -}}
+apiVersion: {{ default "gateway.networking.k8s.io/v1alpha3" $p.apiVersion }}
+kind: BackendTLSPolicy
+metadata:
+  name: {{ default (printf "%s-backend-tls" $appName) $p.name }}
+  namespace: {{ include "gateway-routes.namespace" . }}
+  labels:
+    {{- include "gateway-routes.labels" . | nindent 4 }}
+spec:
+  targetRefs:
+    - group: ""
+      kind: Service
+      name: {{ default $appName $p.targetServiceName }}
+  {{- with $p.spec }}
+{{ toYaml . | nindent 2 }}
+  {{- end }}
+{{- end }}

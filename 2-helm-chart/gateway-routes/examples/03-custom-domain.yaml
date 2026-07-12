@@ -1,0 +1,35 @@
+# Example 3: Custom domain (app-owned Gateway)
+# The app needs its own domain NOT covered by the shared wildcard gateway.
+# This renders a dedicated Gateway + HTTPS listener in the app namespace and a
+# route attached to it. A TLS secret for the domain must exist (default name:
+# <app>-tls-secret) in the app namespace.
+#
+#   helm install myapp ../gateway-routes -f 03-custom-domain.yaml -n myapp
+
+application:
+  name: myapp
+
+service:
+  port: 8080
+
+gatewayAPI:
+  enabled: true
+
+  # Custom domain(s) -> dedicated per-app Gateway.
+  customHostnames:
+    - myapp.custom-domain.com
+  gatewayClassName: envoy-gateway-class
+  customTlsSecretName: myapp-tls-secret     # optional; defaults to <app>-tls-secret
+
+  # You may ALSO attach to the shared gateway at the same time by adding
+  # shared hostnames here (both listeners then serve the app):
+  # hostnames:
+  #   - myapp.example.com
+
+  policies:
+    backendTraffic:
+      enabled: true
+      spec:
+        timeout:
+          http:
+            requestTimeout: 120s

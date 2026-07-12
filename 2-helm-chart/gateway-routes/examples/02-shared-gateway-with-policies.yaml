@@ -1,0 +1,75 @@
+# Example 2: Path-based routing with policies
+# Multiple path rules, a URL rewrite, plus timeout and TLS-to-upstream policies.
+#
+#   helm install myapp ../gateway-routes -f 02-shared-gateway-with-policies.yaml -n myapp
+
+application:
+  name: myapp
+
+service:
+  port: 80
+
+gatewayAPI:
+  enabled: true
+  gatewayName: main-gateway
+  gatewayNamespace: envoy-gateway-system
+  hostnames:
+    - myapp.example.com
+
+  rules:
+    # Route /api to the API service, stripping the /api prefix.
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /api
+      filters:
+        - type: URLRewrite
+          urlRewrite:
+            path:
+              type: ReplacePrefixMatch
+              replacePrefixMatch: /
+      backendRefs:
+        - group: ""
+          kind: Service
+          name: myapp-api
+          port: 8080
+          weight: 1
+    # Everything else goes to the web frontend.
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - group: ""
+          kind: Service
+          name: myapp-web
+          port: 80
+          weight: 1
+
+  policies:
+    backendTraffic:
+      enabled: true
+      spec:
+        timeout:
+          http:
+            requestTimeout: 60s
+            connectionIdleTimeout: 30s
+        retry:
+          numRetries: 3
+          retryOn:
+            triggers:
+              - connect-failure
+              - retriable-status-codes
+          perRetry:
+            backOff:
+              baseInterval: 100ms
+              maxInterval: 1s
+
+    # Upstream Service speaks HTTPS (equivalent to NGINX backend-protocol: HTTPS).
+    backendTLS:
+      enabled: true
+      targetServiceName: myapp-api
+      spec:
+        validation:
+          wellKnownCACertificates: System
+          hostname: myapp-api.myapp.svc

@@ -1,0 +1,46 @@
+{{- /*
+Gateway (per-application, custom domain) - only rendered when the app needs
+its own domain(s) that are NOT covered by the shared wildcard gateway.
+
+Requires:
+  - gatewayAPI.customHostnames: list of hostnames
+  - a TLS Secret for those hostnames (default: <app>-tls-secret)
+*/ -}}
+{{- $gw := .Values.gatewayAPI | default dict -}}
+{{- if and ($gw.enabled | default false) ($gw.customHostnames | default list) }}
+{{- $appName := include "gateway-routes.appName" . -}}
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: {{ include "gateway-routes.customGatewayName" . }}
+  namespace: {{ include "gateway-routes.namespace" . }}
+  labels:
+    {{- include "gateway-routes.labels" . | nindent 4 }}
+  {{- with $gw.customGatewayAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  gatewayClassName: {{ default "envoy-gateway-class" $gw.gatewayClassName }}
+  listeners:
+    {{- range $gw.customHostnames }}
+    - name: https-{{ . | replace "." "-" | replace "*" "wildcard" | trunc 60 | trimSuffix "-" }}
+      protocol: HTTPS
+      port: 443
+      hostname: {{ . | quote }}
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - kind: Secret
+            name: {{ default (printf "%s-tls-secret" $appName) $gw.customTlsSecretName }}
+      allowedRoutes:
+        namespaces:
+          from: Same
+    {{- end }}
+    - name: http
+      protocol: HTTP
+      port: 80
+      allowedRoutes:
+        namespaces:
+          from: Same
+{{- end }}

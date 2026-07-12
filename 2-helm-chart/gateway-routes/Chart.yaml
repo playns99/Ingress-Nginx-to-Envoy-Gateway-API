@@ -1,0 +1,16 @@
+apiVersion: v2
+name: gateway-routes
+description: >-
+  A generic Helm chart to deploy Gateway API HTTPRoutes and Envoy Gateway
+  traffic policies for an application. Supports the shared platform gateway and
+  optional per-application custom-domain Gateways.
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+keywords:
+  - gateway-api
+  - envoy-gateway
+  - httproute
+  - ingress-migration
+maintainers:
+  - name: platform-team

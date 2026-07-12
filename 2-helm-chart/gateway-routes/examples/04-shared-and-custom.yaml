@@ -1,0 +1,36 @@
+# Example 4: Both shared AND custom domains for one app
+# The app is reachable on the shared wildcard domain and on its own domain.
+#
+#   helm install myapp ../gateway-routes -f 04-shared-and-custom.yaml -n myapp
+
+application:
+  name: myapp
+
+service:
+  port: 80
+
+gatewayAPI:
+  enabled: true
+
+  # Shared wildcard gateway attachment.
+  gatewayName: main-gateway
+  gatewayNamespace: envoy-gateway-system
+  hostnames:
+    - myapp.example.com
+
+  # Plus a dedicated custom-domain Gateway.
+  customHostnames:
+    - myapp.custom-domain.com
+  customTlsSecretName: myapp-tls-secret
+
+  policies:
+    backendTraffic:
+      enabled: true
+      spec:
+        loadBalancer:
+          type: ConsistentHash
+          consistentHash:
+            type: Cookie
+            cookie:
+              name: myapp-session
+              ttl: 3600s
