@@ -143,9 +143,15 @@ def choose_primary_backend(rows: List[Dict[str, Any]], fallback: str) -> Tuple[s
 
 
 def build_rules(rows: List[Dict[str, Any]], ann: Dict[str, str]) -> List[Dict[str, Any]]:
-    """Build gateway-routes 'rules' entries from Ingress paths + NGINX annotations."""
+    """Build gateway-routes 'rules' entries from Ingress paths + NGINX annotations.
+
+    ssl-redirect is deliberately NOT mapped to a RequestRedirect filter here:
+    RequestRedirect cannot share a rule with URLRewrite, and unscoped it would
+    also redirect HTTPS traffic (loop). The shared gateway already has a global
+    http-to-https-redirect route; custom gateways get a dedicated redirect
+    HTTPRoute (see render_reference_manifests).
+    """
     rewrite_target = ann.get("rewrite-target", "")
-    ssl_redirect = is_truthy(ann.get("ssl-redirect", "")) or is_truthy(ann.get("force-ssl-redirect", ""))
 
     rules: List[Dict[str, Any]] = []
     for r in rows:
@@ -163,11 +169,6 @@ def build_rules(rows: List[Dict[str, Any]], ann: Dict[str, str]) -> List[Dict[st
             }],
         }
         filters: List[Dict[str, Any]] = []
-        if ssl_redirect:
-            filters.append({
-                "type": "RequestRedirect",
-                "requestRedirect": {"scheme": "https", "statusCode": 301},
-            })
         if rewrite_target:
             filters.append({
                 "type": "URLRewrite",
@@ -233,9 +234,19 @@ def build_policies(ann: Dict[str, str]) -> Tuple[Dict[str, Any], List[str]]:
     if backend_spec:
         policies["backendTraffic"] = {"enabled": True, "spec": backend_spec}
 
-    # Upstream TLS (backend-protocol: HTTPS).
+    # Upstream TLS (backend-protocol: HTTPS). BackendTLSPolicy v1alpha3 requires
+    # spec.validation (hostname + a CA source); the hostname is filled in by
+    # build_values once the target service and namespace are known.
     if ann.get("backend-protocol", "").strip().upper() == "HTTPS":
-        policies["backendTLS"] = {"enabled": True}
+        policies["backendTLS"] = {
+            "enabled": True,
+            "spec": {
+                "validation": {
+                    "wellKnownCACertificates": "System",
+                    "hostname": "",
+                },
+            },
+        }
 
     # Annotations with no clean native mapping -> flag for manual review.
     needs_review = {
@@ -251,17 +262,40 @@ def build_policies(ann: Dict[str, str]) -> Tuple[Dict[str, Any], List[str]]:
 # ------------------------------------------------------------------------------
 # Build the gateway-routes values doc for one Ingress
 # ------------------------------------------------------------------------------
-def build_values(ingress: Dict[str, Any], shared_domain_suffix: str) -> Tuple[Dict[str, Any], List[str]]:
+def build_values(ingress: Dict[str, Any], shared_domain_suffix: str) -> Tuple[Dict[str, Any], List[str], List[str]]:
     meta = ingress.get("metadata", {}) or {}
     spec = ingress.get("spec", {}) or {}
     ann = nginx_annotations(meta.get("annotations", {}) or {})
 
     name = meta.get("name", "")
+    namespace = meta.get("namespace", "default")
     rows, hostnames = collect_paths(spec)
     app_name, app_port = choose_primary_backend(rows, name)
 
     rules = build_rules(rows, ann)
     policies, review = build_policies(ann)
+    notes: List[str] = []
+
+    if "backendTLS" in policies:
+        policies["backendTLS"]["spec"]["validation"]["hostname"] = (
+            f"{app_name}.{namespace}.svc.cluster.local"
+        )
+        notes.append(
+            "backend-protocol HTTPS: BackendTLSPolicy validates the upstream cert against "
+            "system CAs with hostname "
+            f"{app_name}.{namespace}.svc.cluster.local. NGINX did NOT verify upstream certs, "
+            "so if the upstream uses a self-signed or internal-CA cert, replace "
+            "wellKnownCACertificates with caCertificateRefs pointing at the CA, and adjust "
+            "the hostname to match the cert's SAN."
+        )
+        tls_services = sorted({r["serviceName"] for r in rows if r.get("serviceName")})
+        if len(tls_services) > 1:
+            notes.append(
+                "backend-protocol HTTPS applies to ALL backends of this Ingress "
+                f"({', '.join(tls_services)}), but the chart renders a BackendTLSPolicy only "
+                f"for the primary service ({app_name}). Apply the per-service policies in "
+                "manifests/ for the others."
+            )
 
     # Split hostnames into shared (match suffix) vs custom (everything else).
     shared_hosts, custom_hosts = [], []
@@ -283,6 +317,21 @@ def build_values(ingress: Dict[str, Any], shared_domain_suffix: str) -> Tuple[Di
         gateway["customHostnames"] = custom_hosts
         gateway["customTlsSecretName"] = f"{app_name}-tls-secret"
 
+    ssl_redirect = is_truthy(ann.get("ssl-redirect", "")) or is_truthy(ann.get("force-ssl-redirect", ""))
+    if ssl_redirect:
+        if shared_hosts:
+            notes.append(
+                "ssl-redirect: no action needed for the shared-gateway hostnames - the "
+                "platform http-to-https-redirect route on main-gateway already redirects "
+                "all HTTP traffic."
+            )
+        if custom_hosts:
+            notes.append(
+                "ssl-redirect: the chart does not render a redirect route for the custom "
+                "gateway. Apply manifests/httproute-redirect.yaml to redirect HTTP on the "
+                "custom domain(s)."
+            )
+
     # Only emit rules when they are non-trivial; otherwise rely on chart default.
     if rules and not rules_are_trivial(rules, app_name, app_port):
         gateway["rules"] = rules
@@ -295,13 +344,15 @@ def build_values(ingress: Dict[str, Any], shared_domain_suffix: str) -> Tuple[Di
         "service": {"port": app_port},
         "gatewayAPI": gateway,
     }
-    return values, review
+    return values, review, notes
 
 
 # ------------------------------------------------------------------------------
 # Raw reference manifests (independent of Helm)
 # ------------------------------------------------------------------------------
-def render_reference_manifests(values: Dict[str, Any], namespace: str) -> Dict[str, Dict[str, Any]]:
+def render_reference_manifests(
+    values: Dict[str, Any], namespace: str, ssl_redirect: bool = False
+) -> Dict[str, Dict[str, Any]]:
     app = values["application"]["name"]
     gw = values["gatewayAPI"]
     out: Dict[str, Dict[str, Any]] = {}
@@ -349,6 +400,24 @@ def render_reference_manifests(values: Dict[str, Any], namespace: str) -> Dict[s
             "metadata": {"name": f"{app}-gateway", "namespace": namespace},
             "spec": {"gatewayClassName": "envoy-gateway-class", "listeners": listeners},
         }
+        # ssl-redirect on a custom gateway: a dedicated route pinned to the
+        # "http" listener via sectionName, so HTTPS traffic is never redirected.
+        # (The shared gateway has a platform-level redirect route already.)
+        if ssl_redirect:
+            out["httproute-redirect.yaml"] = {
+                "apiVersion": "gateway.networking.k8s.io/v1",
+                "kind": "HTTPRoute",
+                "metadata": {"name": f"{app}-http-redirect", "namespace": namespace},
+                "spec": {
+                    "parentRefs": [{"name": f"{app}-gateway", "namespace": namespace,
+                                    "sectionName": "http"}],
+                    "hostnames": list(gw["customHostnames"]),
+                    "rules": [{"filters": [{
+                        "type": "RequestRedirect",
+                        "requestRedirect": {"scheme": "https", "statusCode": 301},
+                    }]}],
+                },
+            }
 
     policies = gw.get("policies", {})
     if policies.get("backendTraffic", {}).get("enabled"):
@@ -362,13 +431,29 @@ def render_reference_manifests(values: Dict[str, Any], namespace: str) -> Dict[s
             },
         }
     if policies.get("backendTLS", {}).get("enabled"):
-        out["backendtlspolicy.yaml"] = {
-            "apiVersion": "gateway.networking.k8s.io/v1alpha3",
-            "kind": "BackendTLSPolicy",
-            "metadata": {"name": f"{app}-backend-tls", "namespace": namespace},
-            "spec": {"targetRefs": [{"group": "", "kind": "Service", "name": app}],
-                     **policies["backendTLS"].get("spec", {})},
-        }
+        # One policy per backend Service: backend-protocol applies to the whole
+        # Ingress, and each policy's validation hostname must match its Service.
+        tls_services: List[str] = []
+        for rule in rules:
+            for ref in rule.get("backendRefs", []) or []:
+                name = ref.get("name")
+                if ref.get("kind") == "Service" and name and name not in tls_services:
+                    tls_services.append(name)
+        for svc in tls_services or [app]:
+            fname = ("backendtlspolicy.yaml" if svc == app
+                     else f"backendtlspolicy-{sanitize(svc)}.yaml")
+            out[fname] = {
+                "apiVersion": "gateway.networking.k8s.io/v1alpha3",
+                "kind": "BackendTLSPolicy",
+                "metadata": {"name": f"{svc}-backend-tls", "namespace": namespace},
+                "spec": {
+                    "targetRefs": [{"group": "", "kind": "Service", "name": svc}],
+                    "validation": {
+                        "wellKnownCACertificates": "System",
+                        "hostname": f"{svc}.{namespace}.svc.cluster.local",
+                    },
+                },
+            }
     return out
 
 
@@ -419,8 +504,12 @@ def main() -> int:
         ns = meta.get("namespace", "default")
         name = meta.get("name", "unknown")
 
-        values, review = build_values(ing, args.shared_domain_suffix)
+        values, review, notes = build_values(ing, args.shared_domain_suffix)
         app_dir = out_root / sanitize(ns) / sanitize(name)
+
+        ann = nginx_annotations(meta.get("annotations", {}) or {})
+        ssl_redirect = (is_truthy(ann.get("ssl-redirect", ""))
+                        or is_truthy(ann.get("force-ssl-redirect", "")))
 
         header = (
             f"# Generated from Ingress {ns}/{name}\n"
@@ -429,24 +518,39 @@ def main() -> int:
         )
         dump_yaml(app_dir / "values.yaml", values, header)
 
-        manifests = render_reference_manifests(values, ns)
+        # Keep the source Ingress alongside the generated files for audit,
+        # diffing, and rollback during cutover.
+        dump_yaml(
+            app_dir / "ingress-original.yaml", ing,
+            f"# Original Ingress {ns}/{name} as read from context {context}\n",
+        )
+
+        manifests = render_reference_manifests(values, ns, ssl_redirect=ssl_redirect)
         for fname, doc in manifests.items():
             dump_yaml(
                 app_dir / "manifests" / fname, doc,
                 f"# Reference manifest generated from Ingress {ns}/{name}\n",
             )
 
-        if review:
+        if review or notes:
+            sections: List[str] = []
+            if review:
+                sections.append(
+                    "These NGINX annotations have no automatic mapping and need manual review:\n\n"
+                    + "\n".join(f"  - {NGINX_PREFIX}{a}" for a in review)
+                )
+            if notes:
+                sections.append("Notes:\n\n" + "\n".join(f"  - {n}" for n in notes))
             (app_dir / "MANUAL-REVIEW.txt").write_text(
-                "These NGINX annotations have no automatic mapping and need manual review:\n\n"
-                + "\n".join(f"  - {NGINX_PREFIX}{a}" for a in review) + "\n",
-                encoding="utf-8",
+                "\n\n".join(sections) + "\n", encoding="utf-8",
             )
 
         print(f"[OK]  {ns}/{name} -> {app_dir}"
-              + (f"  (manual review: {len(review)})" if review else ""))
+              + (f"  (manual review: {len(review)}, notes: {len(notes)})"
+                 if review or notes else ""))
         summary.append({"namespace": ns, "ingress": name,
-                        "manual_review": review, "output": str(app_dir)})
+                        "manual_review": review, "notes": notes,
+                        "output": str(app_dir)})
 
     dump_yaml(out_root / "_summary.yaml",
               {"context": context, "count": len(summary), "items": summary})

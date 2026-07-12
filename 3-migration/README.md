@@ -1,14 +1,65 @@
 # 3 - Ingress → Gateway API migration
 
-`migrate_ingress_to_gateway.py` reads the **Ingress** objects in a cluster and,
-for each one, generates:
+`migrate_ingress_to_gateway.py` migrates NGINX **Ingress** objects to **Envoy
+Gateway (Gateway API)** resources. It is **read-only against the cluster**: it
+never creates, changes, or deletes anything in Kubernetes — it only reads
+Ingresses and writes files locally. You choose what to deploy, and how.
 
-1. A **Helm values file** for the `gateway-routes` chart (folder `2-helm-chart`).
-2. **Reference raw manifests** (`HTTPRoute`, `Gateway`, policies) for review.
-3. A `MANUAL-REVIEW.txt` listing NGINX annotations with no automatic mapping.
+## What the script does — 3 steps
 
-It uses your **current kubectl context** (or `--context`) and does not modify
-the cluster — it only reads Ingresses and writes files.
+**Step 1 — Extract.** It pulls every Ingress object from your current kubectl
+context (or `--context <name>`) via `kubectl get ingress -o json`, across all
+namespaces (or one, with `--namespace`). Each Ingress is saved as
+`ingress-original.yaml` next to its generated files, so you always have the
+source object for review, diffing, and rollback.
+
+**Step 2 — Generate raw manifests.** For each Ingress it writes ready-to-apply
+Gateway API manifests under `manifests/`:
+
+| File | When it is generated |
+|------|----------------------|
+| `httproute.yaml` | Always — hostnames, path rules, rewrites, backends |
+| `gateway.yaml` | Only if the app has custom (non-shared) domains |
+| `httproute-redirect.yaml` | Only for custom domains with `ssl-redirect` — HTTP→HTTPS redirect pinned to the custom gateway's `http` listener |
+| `backendtrafficpolicy.yaml` | Only if timeout / session-affinity annotations exist |
+| `backendtlspolicy*.yaml` | Only for `backend-protocol: HTTPS` — one per backend Service |
+
+**Step 3 — Generate Helm values.** For each Ingress it also writes a
+`values.yaml` for the `gateway-routes` chart (folder `2-helm-chart`), which
+renders the same resources as the raw manifests.
+
+## Choose your deployment path
+
+Both paths produce the same Gateway API resources — pick per app:
+
+**Option A — Helm (recommended).** Deploy through the `gateway-routes` chart.
+You get upgrades, rollback, and uninstall per app, and the same chart is how
+you create **future routes for new apps** — write a small `values.yaml` by
+hand (see `2-helm-chart/gateway-routes/examples/`), no migration script
+needed.
+
+```bash
+# Preview without touching the cluster
+helm template <app> ../2-helm-chart/gateway-routes \
+  -f generated/<context>/<namespace>/<app>/values.yaml -n <namespace>
+
+# Deploy
+helm install <app> ../2-helm-chart/gateway-routes \
+  -f generated/<context>/<namespace>/<app>/values.yaml -n <namespace>
+```
+
+**Option B — Raw manifests.** Apply the generated YAML directly. Good for a
+quick review-and-apply migration or for teams that manage YAML in GitOps
+without Helm:
+
+```bash
+# Server-side dry run first
+kubectl apply --dry-run=server -f generated/<context>/<namespace>/<app>/manifests/
+
+kubectl apply -f generated/<context>/<namespace>/<app>/manifests/
+```
+
+> Pick ONE option per app — applying both would create duplicate routes.
 
 ## Prerequisites
 
@@ -48,43 +99,29 @@ generated/
     ├── _summary.yaml                     # index of everything generated
     └── <namespace>/
         └── <ingress-name>/
-            ├── values.yaml               # feed this to the gateway-routes chart
-            ├── MANUAL-REVIEW.txt          # only if unmapped annotations exist
-            └── manifests/                # reference-only raw manifests
+            ├── ingress-original.yaml     # STEP 1: source Ingress (audit/rollback)
+            ├── values.yaml               # STEP 3: feed this to the gateway-routes chart
+            ├── MANUAL-REVIEW.txt          # unmapped annotations + migration notes
+            └── manifests/                # STEP 2: ready-to-apply raw manifests
                 ├── httproute.yaml
-                ├── gateway.yaml           # only for custom domains
-                ├── backendtrafficpolicy.yaml
-                └── backendtlspolicy.yaml
-```
-
-## Deploy the generated values
-
-```bash
-helm install <app> ../2-helm-chart/gateway-routes \
-  -f generated/<context>/<namespace>/<app>/values.yaml \
-  -n <namespace>
-```
-
-Preview first without touching the cluster:
-
-```bash
-helm template <app> ../2-helm-chart/gateway-routes \
-  -f generated/<context>/<namespace>/<app>/values.yaml \
-  -n <namespace>
+                ├── gateway.yaml               # custom domains only
+                ├── httproute-redirect.yaml    # custom domains with ssl-redirect only
+                ├── backendtrafficpolicy.yaml  # timeouts/affinity only
+                └── backendtlspolicy*.yaml     # backend-protocol HTTPS only
 ```
 
 ## What gets converted
 
 | NGINX annotation | Mapped to |
 |------------------|-----------|
+| Ingress rules (host/path/service) | `HTTPRoute` hostnames + rules |
+| `rewrite-target` | `HTTPRoute` `URLRewrite` filter |
 | `proxy-connect-timeout` | `BackendTrafficPolicy.timeout.tcp.connectTimeout` |
 | `proxy-read-timeout` | `BackendTrafficPolicy.timeout.http.requestTimeout` |
 | `proxy-send-timeout` | `BackendTrafficPolicy.timeout.http.connectionIdleTimeout` |
-| `backend-protocol: HTTPS` | `BackendTLSPolicy` (TLS to upstream) |
+| `backend-protocol: HTTPS` | `BackendTLSPolicy` per backend Service (system CAs + service hostname — see MANUAL-REVIEW notes if upstream certs are self-signed) |
 | `affinity: cookie` / `session-cookie-name` | `BackendTrafficPolicy.loadBalancer.consistentHash` (Cookie) |
-| `ssl-redirect` / `force-ssl-redirect` | `HTTPRoute` `RequestRedirect` filter |
-| `rewrite-target` | `HTTPRoute` `URLRewrite` filter |
-| Ingress rules (host/path/service) | `HTTPRoute` hostnames + rules |
+| `ssl-redirect` / `force-ssl-redirect` | Shared domains: nothing to do — the platform `http-to-https-redirect` route on `main-gateway` already covers them. Custom domains: `manifests/httproute-redirect.yaml` |
 
 ### Intentionally NOT converted
 
@@ -97,7 +134,12 @@ helm template <app> ../2-helm-chart/gateway-routes \
 ## Recommended workflow
 
 1. Run the script against the source cluster.
-2. Review each `values.yaml` and any `MANUAL-REVIEW.txt`.
-3. `helm template` to preview, then `helm install` per app.
-4. Validate the `HTTPRoute` status (`Accepted=True`, `ResolvedRefs=True`).
+2. Per app: review `ingress-original.yaml` vs the generated output, plus any
+   `MANUAL-REVIEW.txt` notes.
+3. Choose Option A (Helm) or Option B (raw manifests) and preview with
+   `helm template` / `kubectl apply --dry-run=server`.
+4. Deploy, then validate the `HTTPRoute` status (`Accepted=True`,
+   `ResolvedRefs=True`).
 5. Cut over DNS / traffic, then decommission the old Ingress.
+6. For **new apps after the migration**, skip the script — copy an example from
+   `2-helm-chart/gateway-routes/examples/` and deploy with Helm.
